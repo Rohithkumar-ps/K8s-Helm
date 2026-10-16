@@ -4,12 +4,13 @@ pipeline {
     options {
         skipDefaultCheckout(true)
         timestamps()
+        disableConcurrentBuilds()
     }
 
     environment {
         AWS_REGION       = 'ap-south-1'
         ECR_REPOSITORY   = 'cicd-demo-app'
-        EKS_CLUSTER_NAME = 'REPLACE_WITH_YOUR_EKS_CLUSTER_NAME'
+        EKS_CLUSTER_NAME = 'jenkins-eks-cluster'
         K8S_NAMESPACE    = 'dev'
         HELM_RELEASE     = 'myapp-dev'
         IMAGE_TAG        = "${BUILD_NUMBER}"
@@ -19,7 +20,15 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
-                sh 'git log -1 --oneline'
+                sh '''
+                    set -eu
+                    git log -1 --oneline
+                    test -f app/Dockerfile
+                    test -f app/index.html
+                    test -f app/helm/myapp/Chart.yaml
+                    test -f app/helm/myapp/templates/deployment.yaml
+                    test -f app/helm/myapp/templates/service.yaml
+                '''
             }
         }
 
@@ -40,7 +49,7 @@ pipeline {
             steps {
                 script {
                     env.AWS_ACCOUNT_ID = sh(
-                        script: "aws sts get-caller-identity --query Account --output text",
+                        script: 'aws sts get-caller-identity --query Account --output text',
                         returnStdout: true
                     ).trim()
 
@@ -51,11 +60,9 @@ pipeline {
                 sh '''
                     set -eu
 
+                    # Verify the existing repository; do not create another.
                     aws ecr describe-repositories \
                       --repository-names "$ECR_REPOSITORY" \
-                      --region "$AWS_REGION" >/dev/null 2>&1 || \
-                    aws ecr create-repository \
-                      --repository-name "$ECR_REPOSITORY" \
                       --region "$AWS_REGION"
 
                     aws ecr get-login-password \
@@ -71,10 +78,16 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    docker build \
-                      --pull \
-                      -t "$ECR_REPOSITORY:$IMAGE_TAG" .
+
+                    # Dockerfile and build context are inside app/.
+                    docker build --pull \
+                      -t "$ECR_REPOSITORY:$IMAGE_TAG" app/
+
                     docker image inspect "$ECR_REPOSITORY:$IMAGE_TAG"
+
+                    # Validate the NGINX configuration inside the image.
+                    docker run --rm \
+                      "$ECR_REPOSITORY:$IMAGE_TAG" nginx -t
                 '''
             }
         }
@@ -84,7 +97,8 @@ pipeline {
                 sh '''
                     set -eu
 
-                    docker tag "$ECR_REPOSITORY:$IMAGE_TAG" \
+                    docker tag \
+                      "$ECR_REPOSITORY:$IMAGE_TAG" \
                       "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
                     docker push \
@@ -97,6 +111,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     aws eks update-kubeconfig \
                       --region "$AWS_REGION" \
                       --name "$EKS_CLUSTER_NAME"
@@ -110,8 +125,10 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    helm lint ./helm/myapp
-                    helm template "$HELM_RELEASE" ./helm/myapp \
+
+                    helm lint ./app/helm/myapp
+
+                    helm template "$HELM_RELEASE" ./app/helm/myapp \
                       --namespace "$K8S_NAMESPACE" \
                       --set-string image.repository="$ECR_REGISTRY/$ECR_REPOSITORY" \
                       --set-string image.tag="$IMAGE_TAG"
@@ -124,13 +141,13 @@ pipeline {
                 sh '''
                     set -eu
 
-                    helm upgrade --install "$HELM_RELEASE" ./helm/myapp \
+                    helm upgrade --install "$HELM_RELEASE" ./app/helm/myapp \
                       --namespace "$K8S_NAMESPACE" \
                       --create-namespace \
                       --set-string image.repository="$ECR_REGISTRY/$ECR_REPOSITORY" \
                       --set-string image.tag="$IMAGE_TAG" \
                       --wait \
-                      --timeout 5m
+                      --timeout 10m
 
                     kubectl rollout status \
                       deployment/"$HELM_RELEASE" \
@@ -146,10 +163,10 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: Image pushed to ECR and deployed using Helm.'
+            echo 'SUCCESS: Image pushed to ECR and deployed to EKS using Helm.'
         }
         failure {
-            echo 'FAILED: Check the Jenkins console output for the failing stage.'
+            echo 'FAILED: Check the first failing stage in the Jenkins console output.'
         }
         always {
             echo 'Pipeline execution finished.'
