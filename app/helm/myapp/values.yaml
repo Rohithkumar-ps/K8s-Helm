@@ -1,3 +1,4 @@
+
 replicaCount: 2
 
 image:
@@ -7,10 +8,11 @@ image:
 
 service:
   type: LoadBalancer
+  loadBalancerClass: eks.amazonaws.com/nlb
   port: 80
   annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: external
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
     service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
 
 containerPort: 80
+
